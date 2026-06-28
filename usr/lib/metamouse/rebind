@@ -1,0 +1,21 @@
+#!/bin/sh
+# metamouse-rebind DEV
+#   DEV = hid device kernel name, e.g. 0003:1AF3:0001.0006
+# Move the device from whatever HID driver currently holds it (hid-generic)
+# to metamouse, so our input_mapping remap takes effect. Idempotent.
+set -e
+dev="$1"
+[ -n "$dev" ] || exit 1
+
+modprobe metamouse 2>/dev/null || true
+
+cur=""
+[ -e "/sys/bus/hid/devices/$dev/driver" ] &&
+	cur=$(basename "$(readlink -f "/sys/bus/hid/devices/$dev/driver")")
+
+[ "$cur" = "metamouse" ] && exit 0
+
+if [ -n "$cur" ]; then
+	echo -n "$dev" > "/sys/bus/hid/drivers/$cur/unbind" 2>/dev/null || true
+fi
+echo -n "$dev" > /sys/bus/hid/drivers/metamouse/bind 2>/dev/null || true

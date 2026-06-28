@@ -1,0 +1,6 @@
+# Reclaim the ZOWIE mouse from hid-generic for metamouse, on boot and on every
+# replug. HID_ID is bus:VVVVVVVV:PPPPPPPP (hex, zero-padded). %k is the hid
+# device kernel name (e.g. 0003:1AF3:0001.0006). systemd-run --no-block runs
+# the rebind asynchronously so the udev event isn't blocked by the rebind's own
+# child uevents.
+ACTION=="add", SUBSYSTEM=="hid", ENV{HID_ID}=="0003:00001AF3:00000001", RUN+="/usr/bin/systemd-run --no-block /usr/lib/metamouse/rebind %k"
