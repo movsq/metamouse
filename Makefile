@@ -8,6 +8,8 @@ KDIR ?= /lib/modules/$(KVER)/build
 
 MODULE  := metamouse
 CONFDIR := $(DESTDIR)/etc
+UDEVDIR := $(DESTDIR)/etc/udev/rules.d
+LIBDIR  := $(DESTDIR)/usr/lib/metamouse
 
 all:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
@@ -26,13 +28,17 @@ unload:
 install: all
 	$(MAKE) -C $(KDIR) M=$(CURDIR) modules_install
 	depmod -a $(KVER)
-	install -Dm644 etc/modprobe.d/$(MODULE).conf    $(CONFDIR)/modprobe.d/$(MODULE).conf
-	install -Dm644 etc/modules-load.d/$(MODULE).conf $(CONFDIR)/modules-load.d/$(MODULE).conf
+	install -Dm644 etc/modprobe.d/$(MODULE).conf       $(CONFDIR)/modprobe.d/$(MODULE).conf
+	install -Dm644 etc/modules-load.d/$(MODULE).conf   $(CONFDIR)/modules-load.d/$(MODULE).conf
+	install -Dm644 etc/udev/rules.d/99-$(MODULE).rules $(UDEVDIR)/99-$(MODULE).rules
+	install -Dm755 usr/lib/metamouse/rebind            $(LIBDIR)/rebind
 
 uninstall:
 	rm -f /lib/modules/$(KVER)/extra/$(MODULE).ko
 	rm -f $(CONFDIR)/modprobe.d/$(MODULE).conf
 	rm -f $(CONFDIR)/modules-load.d/$(MODULE).conf
+	rm -f $(UDEVDIR)/99-$(MODULE).rules
+	rm -f $(LIBDIR)/rebind
 	depmod -a $(KVER)
 
 help:
