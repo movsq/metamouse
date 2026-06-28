@@ -1,42 +1,40 @@
 # metamouse
 
-A Linux kernel module that remaps a mouse button to a keyboard keycode using
-kprobes — no kernel-tree patch, no userspace daemon, no `uinput` device. The
-original use case is turning a mouse thumb button into **Super/Mod4**
-(`KEY_LEFTMETA`) so it can act as a window-manager modifier, but any
-`src_code` → `dst_code` mapping works.
-
-> **Architecture:** x86-64 only. The in-flight rewrite reads function arguments
-> from `pt_regs` using the SysV AMD64 calling convention; other architectures
-> would need that register access ported.
+A small Linux **HID driver** that remaps a mouse button to a keyboard keycode —
+no kernel-tree patch, no userspace daemon, no `uinput`. The original use case is
+turning a mouse thumb button into **Super/Mod4** (`KEY_LEFTMETA`) so it can act
+as a window-manager modifier, but any HID-usage → keycode mapping works.
 
 ## How it works
 
-A button press normally travels `input_event()` → `input_handle_event()` →
-evdev → libinput → compositor. Two things stop a pointer device from simply
-emitting a key, and metamouse clears both with two kprobes:
+The driver binds the target mouse by its USB vendor/product id and implements
+the HID `input_mapping` callback. While the kernel builds the device's input
+node, metamouse intercepts one HID usage (by default the forward thumb button,
+Button-page usage `0x00090005`) and maps it to `EV_KEY` / `dst_keycode` with
+`hid_map_usage()`. hid-input then sets the capability bit for that key as part
+of registration.
 
-- **`input_event`** — the pre-handler rewrites the event `code` argument in
-  flight (`src_code` → `dst_code`) by patching the saved register that holds
-  argument 3. The event leaves the kernel already looking like the target key.
-- **`input_register_device`** — `input_handle_event()` silently drops any code
-  that is not set in the device's `keybit` capability bitmap, and libinput
-  caches a device's capabilities the moment it *opens* the device. So the module
-  stamps `set_bit(dst_code, dev->keybit)` at registration time, before libinput
-  ever opens the device, making the new key a declared capability.
+That single hook clears both obstacles that previously needed workarounds:
 
-The capability stamp is per-device and idempotent: every freshly registered
-`input_dev` is re-checked, so a hot-replug — which hands the kernel a brand-new
-struct with a clean bitmap — is handled correctly. Both handlers run in atomic
-context and touch nothing that can sleep.
+- **Kernel capability gate** — `input_handle_event()` drops any code not set in
+  the device's `keybit`. Because the mapping is installed at registration time,
+  the bit is set for us; the key is a real capability from the start.
+- **libinput cap caching** — libinput records a device's capabilities when it
+  *opens* the device. Since the capability already exists at registration, it is
+  present before libinput ever opens the device — no stamping race, no replug
+  dance.
+
+Unlike a kprobe-based approach, this touches no saved registers and is not tied
+to any CPU architecture.
 
 ## Requirements
 
-- An **x86-64** Linux system (see the note above).
-- A kernel built with `CONFIG_KPROBES=y` (the default on virtually all distros).
-- Kernel headers for the running kernel (`linux-headers`, `kernel-devel`, …).
+- A kernel built with `CONFIG_HID=y`/`m` (universal) and headers for the running
+  kernel (`linux-headers`, `kernel-devel`, …).
 - `make` and a C compiler.
 - A libinput-based session (Wayland or X) for the remapped key to reach apps.
+- `systemd` and `udev` for the auto-rebind rule (otherwise bind the driver
+  manually — see below).
 
 ## Build
 
@@ -46,22 +44,24 @@ This produces `metamouse.ko`. Run `make help` to list every target.
 
 ## Configuration
 
-The module takes three parameters:
+The **target device** is matched by USB VID/PID in the driver's `id_table`
+(`metamouse.c`); change it there for a different mouse. The **remap** is tuned by
+two module parameters:
 
-| Parameter     | Default                | Meaning                                                         |
-|---------------|------------------------|-----------------------------------------------------------------|
-| `src_code`    | `276` (`BTN_EXTRA`)    | Input event code to intercept and replace.                      |
-| `dst_code`    | `125` (`KEY_LEFTMETA`) | Event code to emit instead.                                     |
-| `target_name` | `""` (any device)      | Exact `input_dev` name to act on; empty matches any device that emits `src_code`. |
+| Parameter     | Default              | Meaning                                                              |
+|---------------|----------------------|----------------------------------------------------------------------|
+| `src_usage`   | `0x00090005`         | HID usage to remap from. `0x00090000` is the Button page; `\| N` selects button N (button 5 = the forward thumb button). |
+| `dst_keycode` | `125` (`KEY_LEFTMETA`) | Input keycode to emit instead.                                     |
 
 Finding the values for **your** device:
 
-- **`src_code`** — run `sudo evtest`, select the mouse, press the button you
-  want to remap, and read the `code NNN` it prints.
-- **`target_name`** — the `Name=` line in `cat /proc/bus/input/devices` (or the
-  name `evtest` shows). Set it to pin the remap to one device; recommended when
-  more than one device can emit `src_code`.
-- **`dst_code`** — any keycode from `<linux/input-event-codes.h>` (e.g. `125`
+- **VID/PID** — `lsusb` (e.g. `ID 1af3:0001`), or
+  `cat /sys/bus/usb/devices/*/idVendor` / `idProduct`.
+- **`src_usage`** — the HID usage of the control. For a standard mouse button N
+  it is `0x00090000 | N`. To inspect the report descriptor:
+  `cat /sys/bus/hid/devices/<id>/report_descriptor | hidrd-convert` (or read it
+  with `usbhid-dump`).
+- **`dst_keycode`** — any keycode from `<linux/input-event-codes.h>` (e.g. `125`
   for the left Super/Meta key).
 
 ## Install
@@ -69,62 +69,62 @@ Finding the values for **your** device:
 ### DKMS (recommended — rebuilds automatically across kernel upgrades)
 
     sudo dkms add .
-    sudo dkms install metamouse/1.0.0
+    sudo dkms install metamouse/2.0.0
 
-Then install the parameter and boot-autoload configs (edit them for your device
-first):
+Then install the parameter, autoload, and udev configs (edit them for your
+device first):
 
     sudo cp etc/modprobe.d/metamouse.conf     /etc/modprobe.d/
     sudo cp etc/modules-load.d/metamouse.conf /etc/modules-load.d/
+    sudo cp etc/udev/rules.d/99-metamouse.rules /etc/udev/rules.d/
+    sudo install -Dm755 usr/lib/metamouse/rebind /usr/lib/metamouse/rebind
+    sudo udevadm control --reload
 
 ### Manual
 
     sudo make install
+    sudo udevadm control --reload
 
 `make install` builds the module, installs it for the running kernel, runs
-`depmod`, and copies the same `etc/` templates into `/etc`. Re-run it after a
-kernel upgrade (DKMS avoids this).
+`depmod`, and copies the `etc/` templates plus the udev helper into place.
+Re-run it after a kernel upgrade (DKMS avoids this).
 
 ### Quick test without installing
 
     make
-    sudo insmod metamouse.ko src_code=276 dst_code=125 target_name="Your Device Name"
-    # ...
+    sudo insmod metamouse.ko src_usage=0x00090005 dst_keycode=125
+    # then bind the device (see below)
     sudo rmmod metamouse
 
-## Persistence and boot-load
+## Claiming the device from hid-generic
 
-Loading metamouse **before** the session starts is the cleanest setup: the
-capability is stamped at the device's first registration, before libinput opens
-it, so no further action is needed. That is what the two `/etc` files do —
-`modules-load.d` loads the module at boot and `modprobe.d` supplies its
-parameters.
+A mouse is normally held by `hid-generic`. metamouse only takes effect once it
+binds the device. The installed udev rule does this automatically on boot and on
+every replug: when the matching mouse appears it runs `usr/lib/metamouse/rebind`,
+which `modprobe`s metamouse and moves the device off `hid-generic`.
 
-## Applying it to an already-running device
+To do it by hand for an already-connected mouse (find the hid id under
+`ls /sys/bus/hid/drivers/hid-generic/`):
 
-If you load the module while the device is already registered, libinput has
-already cached the old capabilities. Force the input device to be recreated so
-the registration probe fires on a fresh struct. For a USB mouse, unbind and
-rebind its usbhid interface (a physical unplug/replug does the same):
-
-    # Find the interface name under: ls /sys/bus/usb/drivers/usbhid/
-    iface=7-1.2:1.0
-    echo -n "$iface" | sudo tee /sys/bus/usb/drivers/usbhid/unbind
-    sleep 1
-    echo -n "$iface" | sudo tee /sys/bus/usb/drivers/usbhid/bind
-
-`udevadm trigger --action=change` does **not** work here — it only emits a
-uevent and never re-registers the input device, so the probe never fires.
+    id=0003:1AF3:0001.0006
+    echo -n "$id" | sudo tee /sys/bus/hid/drivers/hid-generic/unbind
+    echo -n "$id" | sudo tee /sys/bus/hid/drivers/metamouse/bind
 
 ## Verification
 
 Check the kernel log:
 
     sudo dmesg | grep metamouse
-    # metamouse: armed; src=276 dst=125 target='...'
-    # metamouse: set_bit(125) on '<device>'
+    # metamouse 0003:1AF3:0001.000X: bound <name> (1af3:0001)
+    # metamouse 0003:1AF3:0001.000X: remap usage 0x00090005 -> EV_KEY 125
 
-The device should now advertise the keyboard capability — on Sway:
+Confirm the driver actually holds the device:
+
+    cat /sys/bus/hid/devices/0003:1AF3:0001.*/uevent | grep DRIVER
+    # DRIVER=metamouse
+
+The device should advertise the keyboard capability with **no** unbind/rebind
+dance — on Sway:
 
     swaymsg -t get_inputs    # the mouse appears as both pointer and keyboard
 
@@ -134,9 +134,10 @@ modifier (e.g. a `$mod+Return` shortcut); it should fire.
 ## Uninstall
 
     sudo make uninstall                       # manual install
-    sudo dkms remove metamouse/1.0.0 --all    # DKMS install
+    sudo dkms remove metamouse/2.0.0 --all    # DKMS install
+    sudo udevadm control --reload
 
 ## License
 
-GPL-2.0-or-later — see [COPYING](COPYING). kprobes exports GPL-only symbols, so
-the module must be GPL.
+GPL-2.0-or-later — see [COPYING](COPYING). The HID core exports GPL-only
+symbols, so the module must be GPL.
