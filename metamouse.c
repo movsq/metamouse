@@ -1,126 +1,95 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * metamouse - remap a mouse button to a keyboard keycode via Linux kprobes
+ * metamouse - remap a mouse button to a keyboard keycode via a HID driver
+ *
+ * Binds the target mouse (matched by USB VID/PID) and rewrites one HID usage
+ * to a key at input-mapping time. hid_map_usage() records the new type/code
+ * and hid-input then sets the matching capability bit during input
+ * registration, so the remapped key is a declared capability the instant the
+ * input device appears -- before libinput opens it. No kprobe, no pt_regs, no
+ * register patching, no capability-stamp race.
  *
  * Copyright (C) 2026 Vojtěch Sedláček <ska_coral6n@icloud.com>
  */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/kprobes.h>
+#include <linux/hid.h>
 #include <linux/input.h>
-#include <linux/ptrace.h>
-#include <linux/bitops.h>
-#include <linux/string.h>
 
-/* The in-flight code rewrite reads/writes pt_regs by the x86-64 SysV calling
- * convention (di/si/dx). On other architectures pt_regs has no such members,
- * so fail at compile time with a clear message rather than a cryptic one. */
-#ifndef CONFIG_X86_64
-#error "metamouse uses the x86-64 SysV register layout; port pt_regs access for other arches"
-#endif
+#define USB_VENDOR_ID_ZOWIE	0x1af3
+#define USB_DEVICE_ID_ZOWIE	0x0001
 
-/* "" => match any device that declares src_code (fine for a single mouse).
- * Set to the exact dev->name from the observe pass for precise targeting
- * AND to enable the registration-time capability stamp below. */
-static char *target_name = "";
-module_param(target_name, charp, 0644);
-MODULE_PARM_DESC(target_name, "exact input_dev name ('' = any device declaring src_code)");
+/* HID usage of the source control. Default 0x00090005 = Button page
+ * (HID_UP_BUTTON, 0x00090000) | button 5 = the forward thumb button, which
+ * hid-input would otherwise map to BTN_EXTRA (0x114 / 276). For button N use
+ * 0x00090000 | N (e.g. back button 4 = 0x00090004). */
+static unsigned int src_usage = HID_UP_BUTTON | 0x05;
+module_param(src_usage, uint, 0644);
+MODULE_PARM_DESC(src_usage, "HID usage to remap from (default 0x00090005 = forward button)");
 
-static unsigned int src_code = BTN_EXTRA;    /* forward side button, 0x114 */
-module_param(src_code, uint, 0644);
-MODULE_PARM_DESC(src_code, "source key/button code to remap from");
+/* Input keycode to emit instead. Default 125 = KEY_LEFTMETA (Super/Mod4). */
+static unsigned int dst_keycode = KEY_LEFTMETA;
+module_param(dst_keycode, uint, 0644);
+MODULE_PARM_DESC(dst_keycode, "input keycode to remap to (default 125 = KEY_LEFTMETA)");
 
-static unsigned int dst_code = KEY_LEFTMETA; /* Mod4 / Super, 0x7d */
-module_param(dst_code, uint, 0644);
-MODULE_PARM_DESC(dst_code, "key code to remap to");
-
-static bool dev_matches(struct input_dev *dev)
+/*
+ * Called once per usage while the input device is built, before the default
+ * HID->input mapping. For the source usage we install our own mapping
+ * (EV_KEY -> dst_keycode) and return 1 so hid-input skips its default; every
+ * other usage (movement, wheel, other buttons) returns 0 and maps normally.
+ */
+static int metamouse_input_mapping(struct hid_device *hdev,
+				   struct hid_input *hi,
+				   struct hid_field *field,
+				   struct hid_usage *usage,
+				   unsigned long **bit, int *max)
 {
-	if (!dev || !dev->name)
-		return false;
-	if (target_name[0])
-		return strcmp(dev->name, target_name) == 0;
-	/* match-any mode: any device that can emit the source button */
-	return test_bit(src_code, dev->keybit);
-}
-
-/* Per-device and idempotent: NOT a global flag. A udev re-add hands us a
- * fresh input_dev with a clean keybit, so the cap must be re-checked on
- * that struct — a global bool would skip it and you'd loop forever
- * "fixing" it. */
-static void ensure_cap(struct input_dev *dev)
-{
-	if (!test_bit(dst_code, dev->keybit)) {
-		set_bit(dst_code, dev->keybit);
-		pr_info("metamouse: set_bit(%u) on '%s'\n", dst_code, dev->name);
-	}
-}
-
-/* Probe 1: stamp the capability at registration, before libinput opens the
- * device and caches its caps. Covers any matching device that appears after
- * the module is loaded (incl. the new struct produced by a udev re-add). */
-static int reg_pre(struct kprobe *p, struct pt_regs *regs)
-{
-	struct input_dev *dev = (struct input_dev *)regs->di;
-	if (dev_matches(dev))
-		ensure_cap(dev);
-	return 0;
-}
-
-/* Probe 2: rewrite the button code in-flight. Also stamps the cap as a
- * fallback for a device that was already registered before load. */
-static int ev_pre(struct kprobe *p, struct pt_regs *regs)
-{
-	struct input_dev *dev = (struct input_dev *)regs->di;
-	unsigned int type     = (unsigned int)regs->si;
-	unsigned int code     = (unsigned int)regs->dx;
-
-	if (type != EV_KEY || code != src_code)
-		return 0;
-	if (!dev_matches(dev))
+	if (usage->hid != src_usage)
 		return 0;
 
-	ensure_cap(dev);
-	regs->dx = dst_code;   /* rewrite arg3 (code) */
+	hid_map_usage(hi, usage, bit, max, EV_KEY, dst_keycode);
+	hid_info(hdev, "remap usage 0x%08x -> EV_KEY %u\n", src_usage, dst_keycode);
+	return 1;
+}
+
+static int metamouse_probe(struct hid_device *hdev,
+			   const struct hid_device_id *id)
+{
+	int ret;
+
+	ret = hid_parse(hdev);
+	if (ret) {
+		hid_err(hdev, "hid_parse failed: %d\n", ret);
+		return ret;
+	}
+
+	ret = hid_hw_start(hdev, HID_CONNECT_DEFAULT);
+	if (ret) {
+		hid_err(hdev, "hid_hw_start failed: %d\n", ret);
+		return ret;
+	}
+
+	hid_info(hdev, "bound %s (%04x:%04x)\n",
+		 hdev->name, id->vendor, id->product);
 	return 0;
 }
 
-static struct kprobe kp_reg = {
-	.symbol_name = "input_register_device",
-	.pre_handler = reg_pre,
+static const struct hid_device_id metamouse_devices[] = {
+	{ HID_USB_DEVICE(USB_VENDOR_ID_ZOWIE, USB_DEVICE_ID_ZOWIE) },
+	{ }
 };
-static struct kprobe kp_ev = {
-	.symbol_name = "input_event",
-	.pre_handler = ev_pre,
-};
+MODULE_DEVICE_TABLE(hid, metamouse_devices);
 
-static int __init m_init(void)
-{
-	int ret = register_kprobe(&kp_reg);
-	if (ret < 0) {
-		pr_err("metamouse: kprobe input_register_device failed: %d\n", ret);
-		return ret;
-	}
-	ret = register_kprobe(&kp_ev);
-	if (ret < 0) {
-		pr_err("metamouse: kprobe input_event failed: %d\n", ret);
-		unregister_kprobe(&kp_reg);
-		return ret;
-	}
-	pr_info("metamouse: armed; src=%u dst=%u target='%s'\n",
-		src_code, dst_code, target_name[0] ? target_name : "(any w/ src_code)");
-	return 0;
-}
-static void __exit m_exit(void)
-{
-	unregister_kprobe(&kp_ev);
-	unregister_kprobe(&kp_reg);
-	pr_info("metamouse: removed\n");
-}
-module_init(m_init);
-module_exit(m_exit);
+static struct hid_driver metamouse_driver = {
+	.name		= "metamouse",
+	.id_table	= metamouse_devices,
+	.probe		= metamouse_probe,
+	.input_mapping	= metamouse_input_mapping,
+};
+module_hid_driver(metamouse_driver);
+
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Vojtěch Sedláček <ska_coral6n@icloud.com>");
-MODULE_DESCRIPTION("Remap a mouse button to a modifier via kprobe on input_event");
-MODULE_VERSION("1.0.0");
+MODULE_DESCRIPTION("Remap a mouse button to a modifier via a HID input_mapping driver");
+MODULE_VERSION("2.0.0");
