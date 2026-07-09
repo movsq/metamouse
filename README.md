@@ -71,6 +71,12 @@ Finding the values for **your** device:
     sudo dkms add .
     sudo dkms install metamouse/2.0.0
 
+If you had previously run `make install` (Manual, below), DKMS will refuse to
+overwrite the module already sitting in `updates/` — re-run the install with
+`--force` to let DKMS take ownership of it:
+
+    sudo dkms install metamouse/2.0.0 --force
+
 Then install the parameter, autoload, and udev configs (edit them for your
 device first):
 
