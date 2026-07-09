@@ -103,6 +103,12 @@ binds the device. The installed udev rule does this automatically on boot and on
 every replug: when the matching mouse appears it runs `usr/lib/metamouse/rebind`,
 which `modprobe`s metamouse and moves the device off `hid-generic`.
 
+The helper is fail-safe: it only unbinds the mouse from its current driver once
+metamouse is actually loaded, and if the handoff fails it rebinds the device to
+the driver that held it before. So a missing or stale module — e.g. one not yet
+rebuilt after a kernel upgrade — leaves the mouse on `hid-generic` (remap
+inactive but the mouse fully working) rather than stranding it with no driver.
+
 To do it by hand for an already-connected mouse (find the hid id under
 `ls /sys/bus/hid/drivers/hid-generic/`):
 
