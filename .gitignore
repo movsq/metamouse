@@ -18,4 +18,4 @@ Module.symvers
 # Claude (never committed)
 CLAUDE.md
 .claude/
-.claude_trash/
+.local_trash/

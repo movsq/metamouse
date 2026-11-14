@@ -5,11 +5,7 @@
 
 KVER ?= $(shell uname -r)
 KDIR ?= /lib/modules/$(KVER)/build
-
-MODULE  := metamouse
-CONFDIR := $(DESTDIR)/etc
-UDEVDIR := $(DESTDIR)/etc/udev/rules.d
-LIBDIR  := $(DESTDIR)/usr/lib/metamouse
+CONF := $(DESTDIR)/etc/modprobe.d/metamouse.conf
 
 all:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
@@ -19,26 +15,19 @@ clean:
 
 # Load/unload the freshly built module for a quick test (no install).
 load: all
-	insmod $(MODULE).ko
+	insmod metamouse.ko
 
 unload:
-	rmmod $(MODULE)
+	rmmod metamouse
 
-# Install for the running kernel plus the /etc parameter and autoload configs.
+# Install for the running kernel (into updates/) plus the parameter config.
 install: all
 	$(MAKE) -C $(KDIR) M=$(CURDIR) modules_install
 	depmod -a $(KVER)
-	install -Dm644 etc/modprobe.d/$(MODULE).conf       $(CONFDIR)/modprobe.d/$(MODULE).conf
-	install -Dm644 etc/modules-load.d/$(MODULE).conf   $(CONFDIR)/modules-load.d/$(MODULE).conf
-	install -Dm644 etc/udev/rules.d/99-$(MODULE).rules $(UDEVDIR)/99-$(MODULE).rules
-	install -Dm755 usr/lib/metamouse/rebind            $(LIBDIR)/rebind
+	install -Dm644 etc/modprobe.d/metamouse.conf $(CONF)
 
 uninstall:
-	rm -f /lib/modules/$(KVER)/extra/$(MODULE).ko
-	rm -f $(CONFDIR)/modprobe.d/$(MODULE).conf
-	rm -f $(CONFDIR)/modules-load.d/$(MODULE).conf
-	rm -f $(UDEVDIR)/99-$(MODULE).rules
-	rm -f $(LIBDIR)/rebind
+	rm -f /lib/modules/$(KVER)/updates/metamouse.ko* $(CONF)
 	depmod -a $(KVER)
 
 help:
@@ -49,8 +38,8 @@ help:
 	@echo '  make clean      remove build artifacts'
 	@echo '  make load       insmod the built module (root)'
 	@echo '  make unload     rmmod the module (root)'
-	@echo '  make install    install module + /etc configs (root)'
-	@echo '  make uninstall  remove installed module + configs (root)'
+	@echo '  make install    install module + modprobe config (root)'
+	@echo '  make uninstall  remove installed module + config (root)'
 	@echo
 	@echo 'Overridable variables: KVER (=$(KVER)), KDIR, DESTDIR.'
 

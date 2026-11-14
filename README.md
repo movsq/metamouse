@@ -27,14 +27,19 @@ That single hook clears both obstacles that previously needed workarounds:
 Unlike a kprobe-based approach, this touches no saved registers and is not tied
 to any CPU architecture.
 
+Claiming the mouse needs no udev rule or rebind script either: a driver whose
+`id_table` matches wins over `hid-generic` when the mouse is plugged in, the
+module autoloads from its HID modalias, and if it loads while `hid-generic`
+already holds the mouse, the HID core reprobes the device over to metamouse. If
+the module is missing (e.g. not rebuilt for a new kernel) the mouse just stays on
+`hid-generic` and keeps working, unremapped.
+
 ## Requirements
 
 - A kernel built with `CONFIG_HID=y`/`m` (universal) and headers for the running
   kernel (`linux-headers`, `kernel-devel`, …).
 - `make` and a C compiler.
 - A libinput-based session (Wayland or X) for the remapped key to reach apps.
-- `systemd` and `udev` for the auto-rebind rule (otherwise bind the driver
-  manually — see below).
 
 ## Build
 
@@ -44,8 +49,8 @@ This produces `metamouse.ko`. Run `make help` to list every target.
 
 ## Configuration
 
-The **target device** is matched by USB VID/PID in the driver's `id_table`
-(`metamouse.c`); change it there for a different mouse. The **remap** is tuned by
+The **target devices** are matched by USB VID/PID in the driver's `id_table`
+(`metamouse.c`); add a `HID_USB_DEVICE(vid, pid)` line there for your mouse. The **remap** is tuned by
 two module parameters:
 
 | Parameter     | Default              | Meaning                                                              |
@@ -69,57 +74,36 @@ Finding the values for **your** device:
 ### DKMS (recommended — rebuilds automatically across kernel upgrades)
 
     sudo dkms add .
-    sudo dkms install metamouse/2.0.0
+    sudo dkms install metamouse/2.1.0
+    sudo cp etc/modprobe.d/metamouse.conf /etc/modprobe.d/
 
 If you had previously run `make install` (Manual, below), DKMS will refuse to
 overwrite the module already sitting in `updates/` — re-run the install with
-`--force` to let DKMS take ownership of it:
-
-    sudo dkms install metamouse/2.0.0 --force
-
-Then install the parameter, autoload, and udev configs (edit them for your
-device first):
-
-    sudo cp etc/modprobe.d/metamouse.conf     /etc/modprobe.d/
-    sudo cp etc/modules-load.d/metamouse.conf /etc/modules-load.d/
-    sudo cp etc/udev/rules.d/99-metamouse.rules /etc/udev/rules.d/
-    sudo install -Dm755 usr/lib/metamouse/rebind /usr/lib/metamouse/rebind
-    sudo udevadm control --reload
+`--force` to let DKMS take ownership of it.
 
 ### Manual
 
     sudo make install
-    sudo udevadm control --reload
 
 `make install` builds the module, installs it for the running kernel, runs
-`depmod`, and copies the `etc/` templates plus the udev helper into place.
+`depmod`, and copies the modprobe config into place.
 Re-run it after a kernel upgrade (DKMS avoids this).
 
 ### Quick test without installing
 
     make
     sudo insmod metamouse.ko src_usage=0x00090005 dst_keycode=125
-    # then bind the device (see below)
     sudo rmmod metamouse
 
-## Claiming the device from hid-generic
+## Rebinding by hand
 
-A mouse is normally held by `hid-generic`. metamouse only takes effect once it
-binds the device. The installed udev rule does this automatically on boot and on
-every replug: when the matching mouse appears it runs `usr/lib/metamouse/rebind`,
-which `modprobe`s metamouse and moves the device off `hid-generic`.
-
-The helper is fail-safe: it only unbinds the mouse from its current driver once
-metamouse is actually loaded, and if the handoff fails it rebinds the device to
-the driver that held it before. So a missing or stale module — e.g. one not yet
-rebuilt after a kernel upgrade — leaves the mouse on `hid-generic` (remap
-inactive but the mouse fully working) rather than stranding it with no driver.
-
-To do it by hand for an already-connected mouse (find the hid id under
-`ls /sys/bus/hid/drivers/hid-generic/`):
+The HID core moves a device from `hid-generic` to a newly loaded driver only
+once per plug-in, and unloading metamouse leaves the mouse without a driver. So
+after an `rmmod`/`insmod` cycle while testing, either replug the mouse or move it
+over by hand (find the id under `ls /sys/bus/hid/devices/`):
 
     id=0003:1AF3:0001.0006
-    echo -n "$id" | sudo tee /sys/bus/hid/drivers/hid-generic/unbind
+    echo -n "$id" | sudo tee /sys/bus/hid/drivers/hid-generic/unbind  # if bound
     echo -n "$id" | sudo tee /sys/bus/hid/drivers/metamouse/bind
 
 ## Verification
@@ -127,7 +111,6 @@ To do it by hand for an already-connected mouse (find the hid id under
 Check the kernel log:
 
     sudo dmesg | grep metamouse
-    # metamouse 0003:1AF3:0001.000X: bound <name> (1af3:0001)
     # metamouse 0003:1AF3:0001.000X: remap usage 0x00090005 -> EV_KEY 125
 
 Confirm the driver actually holds the device:
@@ -135,8 +118,7 @@ Confirm the driver actually holds the device:
     cat /sys/bus/hid/devices/0003:1AF3:0001.*/uevent | grep DRIVER
     # DRIVER=metamouse
 
-The device should advertise the keyboard capability with **no** unbind/rebind
-dance — on Sway:
+The device should advertise the keyboard capability — on Sway:
 
     swaymsg -t get_inputs    # the mouse appears as both pointer and keyboard
 
@@ -146,8 +128,7 @@ modifier (e.g. a `$mod+Return` shortcut); it should fire.
 ## Uninstall
 
     sudo make uninstall                       # manual install
-    sudo dkms remove metamouse/2.0.0 --all    # DKMS install
-    sudo udevadm control --reload
+    sudo dkms remove metamouse/2.1.0 --all    # DKMS install
 
 ## License
 
