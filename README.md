@@ -81,6 +81,12 @@ If you had previously run `make install` (Manual, below), DKMS will refuse to
 overwrite the module already sitting in `updates/` — re-run the install with
 `--force` to let DKMS take ownership of it.
 
+Upgrading from 2.0.x: if your initramfs generator copies `/etc/modules-load.d`
+into the image (dracut does), the old module and its autoload entry stay in the
+initramfs and load at boot ahead of the new one. Regenerate the initramfs once
+after upgrading (`dracut --regenerate-all --force`, `mkinitcpio -P`, or your
+distro's equivalent).
+
 ### Manual
 
     sudo make install
